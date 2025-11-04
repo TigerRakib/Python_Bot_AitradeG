@@ -1,5 +1,8 @@
 # app/routers/bot_manager.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app import models, schemas
+from app.database import SessionLocal, engine
 import asyncio
 from app.routers.calculate import fetch_and_execute_buy
 router = APIRouter(prefix="/bots", tags=["Bot Manager"])
@@ -7,16 +10,32 @@ router = APIRouter(prefix="/bots", tags=["Bot Manager"])
 # Example in-memory store
 USER_BOTS = {}
 
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 @router.post("/create")
-async def create_bot(user_id: str, api_key: str, secret_key: str):
-    USER_BOTS[user_id] = {
-        "user_id": user_id,
-        "api_key": api_key,
-        "secret_key": secret_key,
-        "active": True,
-        "running":False,
-    }
-    return {"message": f"Bot created for {user_id}"}
+async def create_bot(bot: schemas.BotCreate, db: Session = Depends(get_db)):
+    existing_bot = db.query(models.Bot).filter(models.Bot.user_id == bot.user_id).first()
+    if existing_bot:
+        raise HTTPException(status_code=400, detail="Bot already exists for this user")
+
+    new_bot = models.Bot(
+        user_id=bot.user_id,
+        api_key=bot.api_key,
+        secret_key=bot.secret_key,
+        active=True,
+        running=False,
+    )
+    db.add(new_bot)
+    db.commit()
+    db.refresh(new_bot)
+
+    return {"message": f"Bot created for {bot.user_id}"}
 
 @router.post("/start/{user_id}")
 async def start_bot(user_id: str):

@@ -23,16 +23,15 @@ else:
     BINANCE_BASE_URL = "https://api.binance.com"
     print("🚀 Running in LIVE mode (real trades will execute).")
 
-API_KEY =  "yaWn3isqK3dkDBP4P9pi0rEaagzHfKBLLpJsJjQ4yCsc9SkPqLRzOExsOkjbCgCS"
-API_SECRET = "lSADHDGy2nKswJfKju0k5qWrySqEyMUKZ6p5fikSCawzKULOSeKdjogOmx8YpDSf"
-
+API_KEY = os.getenv("API_SECRET")
+API_SECRET = os.getenv("API_SECRET")
 API_BASE = "https://backend.mytradegenius.com/binance_prices/latest_5m"
 WS_URL = "wss://stream.binance.com:9443/stream?streams="
 
 SLEEP_INTERVAL = 5           # seconds between TSL loops
 WS_BATCH_SIZE = 200          # max streams per WebSocket
 ENTRY_PRICE_UPDATE_HOURS = {1, 5, 9, 13, 17, 21}
-ENTRY_PRICE_UPDATE_MINUTE = 41
+ENTRY_PRICE_UPDATE_MINUTE = 10
 MULTIPLIER = 3.5
 
 # ============================================================
