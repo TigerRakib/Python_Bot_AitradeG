@@ -8,11 +8,11 @@ import asyncio
 
 from app.routers.bot_manager import router as bot_manager_router, get_all_active_bots
 from app.routers.calculate import fetch_and_execute_buy
-
+from app.routers.transactions import router as transactions_logs
 app = FastAPI(title="Multi-User Trading Bot")
 
 app.include_router(bot_manager_router)
-
+app.include_router(transactions_logs)
 # Scheduler setup
 executors = {
     "asyncio": AsyncIOExecutor(),
@@ -21,7 +21,7 @@ executors = {
 
 scheduler = AsyncIOScheduler(executors=executors, timezone=timezone.utc)
 
-BUY_HOURS = [0, 4, 8, 12, 16, 20]  # Every 4 hours
+BUY_HOURS = [1, 5, 9, 13, 17, 21]  # Every 4 hours
 BUY_MINUTE = 10
 
 

@@ -9,13 +9,21 @@ import hashlib
 import urllib.parse
 from datetime import datetime, timezone
 import os, random
+from app.models import Transaction
+from app.database import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.routers.trading_bot import get_buy_signals
+from dotenv import load_dotenv
+from app.models import BotTradeState
+from sqlalchemy import select
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
 router = APIRouter(prefix="/Python-BOT", tags=["Python-bot"])
 TESTNET = True  # 🧪 True = Binance Testnet, False = Live trading
-
+load_dotenv()  
 if TESTNET:
     BINANCE_BASE_URL = "https://testnet.binance.vision"
     print("🧪 Running in TESTNET mode (no real funds).")
@@ -23,7 +31,7 @@ else:
     BINANCE_BASE_URL = "https://api.binance.com"
     print("🚀 Running in LIVE mode (real trades will execute).")
 
-API_KEY = os.getenv("API_SECRET")
+API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
 API_BASE = "https://backend.mytradegenius.com/binance_prices/latest_5m"
 WS_URL = "wss://stream.binance.com:9443/stream?streams="
@@ -88,69 +96,90 @@ async def binance_request(method: str, path: str, params=None, signed=False):
 TRADE_LOGS = []  # List to store completed trade summaries
 BOUGHT_SYMBOLS = set()
 
-async def execute_buy(reason, price, time_, symbol, entry_amount=50, timeline=None):
+async def execute_buy(user_id,reason, price, time_, symbol, entry_amount=50, timeline=None, db: AsyncSession = None):
     try:
         quantity = round(entry_amount // price, 5)
         payload = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": quantity}
 
         print(f"🟢 [BUY INITIATED] {symbol} @ {price:.5f} | Qty: {quantity} | Reason: {reason}")
+        await update_bot_state(user_id, symbol, "BUYING", f"Initiating BUY at {price:.5f}")
         res = await binance_request("POST", "/api/v3/order", payload, signed=True)
         BOUGHT_SYMBOLS.add(symbol)
-        trade = {
-            "_id": f"TRADE-{symbol}-{int(datetime.utcnow().timestamp())}",
-            "tradeId": f"AISUPERBOT-{int(datetime.utcnow().timestamp()*1000)}",
-            "botId": {
-                "_id": "690073a76542dfe6a1399ac4",
-                "botName": "Python_Rakib"
-            },
-            "side": "BUY",
-            "status": "COMPLETED",
-            "asset": symbol,
-            "pairQuote": "USDT",
-            "exchange": "Binance",
-            "buyDateTime": datetime.utcnow().isoformat() + "Z",
-            "buyPrice": price,
-            "quantity": quantity,
-            "apiResponse": {
-                "simulated": True,
-                "modeTag": "ENTRY_BUY"
-            },
-            "createdAt": datetime.utcnow().isoformat() + "Z",
-            "updatedAt": datetime.utcnow().isoformat() + "Z",
-            "__v": 0,
-            "exchangeFees": round(price * quantity * 0.00055, 8),  # example fee calc
-            "reason": reason,
-        }
-        TRADE_LOGS.append(trade)
-        print(f"✅ Logged BUY trade for {symbol}")
-        print(f"✅ [BUY SUCCESS] {symbol}")
-        
+
+        trade_id = f"TRADE-{symbol}-{int(datetime.utcnow().timestamp())}"
+        exchange_fees = round(price * quantity * 0.00055, 8)
+
+        new_trade = Transaction(
+            id=trade_id,
+            bot_id=user_id,
+            bot_name="Python_Rakib",
+            side="BUY",
+            status="Filled",
+            asset=symbol,
+            quantity=quantity,
+            buy_price=price,
+            exchange_fees=exchange_fees,
+            reason=reason,
+            buy_time=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+
+        async for db in get_db():
+            db.add(new_trade)
+            await db.commit()
+            break
+
+        print(f"✅ [BUY SUCCESS] {symbol} stored in database.")
+        await update_bot_state(user_id, symbol, "HOLD", f"Holding position at entry {price:.5f}")
     except Exception as e:
         print(f"❌ Binance BUY failed for {symbol}: {e}")
 
-async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=50, timeline=None):
+async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=50, timeline=None, db: AsyncSession = None):
     try:
         quantity = round(entry_amount // entry_price, 5)
         payload = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": quantity}
 
         print(f"🔴 [SELL INITIATED] {symbol} @ {price:.5f} | Qty: {quantity} | Reason: {reason}")
         res = await binance_request("POST", "/api/v3/order", payload, signed=True)
-        profit=price-entry_price
-        for trade in TRADE_LOGS:
-            if trade["asset"] == symbol and trade["side"] == "BUY" and "sellPrice" not in trade:
-                trade.update({
-                    "sellPrice": price,
-                    "sellDateTime": datetime.utcnow().isoformat() + "Z",
-                    "status": "COMPLETED",
-                    "profit": profit,
-                    "reason": reason,
-                    "orderIdSell": f"SIM_SELL_{trade['tradeId']}"
-                })
-                print(f"💰 SELL updated for {symbol} | Profit: {profit:.2f}")
-                break
-    except Exception as e:
-        print(f"❌ [SELL FAILED] {symbol} → {res['data']}")
 
+        # --- Calculate profit and exchange fees ---
+        sell_fee = round(price * quantity * 0.00055, 8)
+        profit = round((price - entry_price) * quantity - sell_fee, 8)
+
+        # --- Use provided DB session or create one ---
+        session = db or async_session()
+
+        async with session as s:
+            # Find the most recent BUY trade for this symbol
+            result = await s.execute(
+                select(Transaction)
+                .where(Transaction.asset == symbol)
+                .where(Transaction.side == "BUY")
+                .where(Transaction.status == "COMPLETED")
+                .order_by(Transaction.buy_time.desc())
+            )
+            trade = result.scalars().first()
+
+            if not trade:
+                print(f"⚠️ No matching BUY trade found for {symbol}")
+                return
+
+            # Update the existing transaction
+            trade.sell_price = price
+            trade.sell_time = datetime.utcnow()
+            trade.side = "SELL"
+            trade.status = "COMPLETED"
+            trade.profit = profit
+            trade.reason = reason
+            trade.exchange_fees += sell_fee  # Add sell fee
+
+            await s.commit()
+
+            print(f"💰 [SELL SUCCESS] {symbol} | Profit: {profit:.2f} USDT")
+            await update_bot_state(trade.bot_id, symbol, "SOLD", f"Sold at {price:.5f} | Profit: {profit:.2f}")
+    except Exception as e:
+        print(f"❌ [SELL FAILED] {symbol}: {e}")
+        await update_bot_state(trade.bot_id, symbol, "ERROR", f"Sell failed: {e}")
 # ============================================================
 # ATR CALCULATION
 # ============================================================
@@ -257,6 +286,7 @@ async def process_symbol(session, symbol, entry, price_info, elapsed_min):
         atr = await get_cached_atr(session, symbol)
         if atr is None:
             return
+        # --- Update bot state in DB ---
 
         tsl = get_hybrid_tsl(entry, profit_pct, elapsed_min, atr)
         tp1 = entry * 1.012
@@ -437,6 +467,7 @@ async def fetch_and_execute_buy(user_id: str):
     ENTRY_PRICES[symbol] = entry_price
 
     await execute_buy(
+        user_id,
         "Strong Buy",
         entry_price,
         datetime.utcnow(),
@@ -450,6 +481,43 @@ async def fetch_and_execute_buy(user_id: str):
     # Start TSL monitor for this symbol only
     asyncio.create_task(tsl_monitor({symbol}))
     print(f"⏱️ TSL monitor started for {symbol}")
+    await update_bot_state(user_id, symbol, "MONITORING", f"Monitoring active trade at {entry_price:.5f}")
+
+
+
+async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
+    """
+    Updates or inserts the current working state of a bot for a given symbol.
+    """
+    try:
+        async for db in get_db():
+            # Try to find existing state
+            result = await db.execute(
+                select(BotTradeState)
+                .where(BotTradeState.bot_id == bot_id)
+                .where(BotTradeState.asset == symbol)
+            )
+            state = result.scalars().first()
+
+            if state:
+                # Update existing record
+                state.action = action
+                state.logs = logs
+            else:
+                # Create a new one
+                state = BotTradeState(
+                    bot_id=bot_id,
+                    asset=symbol,
+                    action=action,
+                    logs=logs
+                )
+                db.add(state)
+
+            await db.commit()
+            break
+        print(f"📊 Bot state updated → {bot_id} | {symbol} | {action} | {logs}")
+    except Exception as e:
+        print(f"[STATE ERROR] Failed to update bot state for {symbol}: {e}")
 
 @router.get("/trade-logs")
 async def get_trade_logs():
