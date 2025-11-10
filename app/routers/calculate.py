@@ -112,7 +112,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
 # ============================================================
 # TRADE EXECUTION
 # ============================================================
-async def execute_buy(user_id, reason, price, time_, symbol, entry_amount=50, timeline=None):
+async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amount=50, timeline=None):
     try:
         quantity = round(entry_amount // price, 5)
         payload = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": quantity}
@@ -128,7 +128,7 @@ async def execute_buy(user_id, reason, price, time_, symbol, entry_amount=50, ti
         new_trade = Transaction(
             id=trade_id,
             bot_id=user_id,
-            bot_name="Python_Rakib",
+            bot_name=bot_name,
             side="BUY",
             status="Filled",
             asset=symbol,
@@ -472,7 +472,7 @@ async def fetch_entry_prices(symbols: list):
             
 # Fetch + execute buy
 # --------------------------
-async def fetch_and_execute_buy(user_id: str):
+async def fetch_and_execute_buy(user_id: str,bot_name: str):
     # Use user's keys and run buy logic
     print(f"Executing buy for user {user_id}")
     try:
@@ -509,6 +509,7 @@ async def fetch_and_execute_buy(user_id: str):
 
     await execute_buy(
         user_id,
+        bot_name,
         "Strong Buy",
         entry_price,
         datetime.utcnow(),

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, Float, DateTime, Enum,Integer
+from sqlalchemy import Column, String, Boolean, Float, DateTime, Enum,Integer,UniqueConstraint
 from app.database import Base
 from datetime import datetime
 from sqlalchemy.sql import func
@@ -6,13 +6,17 @@ from sqlalchemy.sql import func
 
 class Bot(Base):
     __tablename__ = "bots"
-
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(String, unique=True, nullable=False) 
+    bot_name = Column(String, nullable=False)
     user_id = Column(String, primary_key=True, index=True)
     api_key = Column(String, nullable=False)
     secret_key = Column(String, nullable=False)
     active = Column(Boolean, default=True)
     running = Column(Boolean, default=False)
-
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_bots_user_id"),
+    )
 class Transaction(Base):
     __tablename__ = "transactions"
 

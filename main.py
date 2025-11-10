@@ -6,7 +6,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from datetime import timezone
 import asyncio
 
-from app.routers.bot_manager import router as bot_manager_router, get_all_active_bots
+from app.routers.bot_manager import router as bot_manager_router, get_all_active_users
 from app.routers.calculate import fetch_and_execute_buy
 from app.routers.transactions import router as transactions_logs
 app = FastAPI(title="Multi-User Trading Bot")
@@ -31,17 +31,18 @@ BUY_MINUTE = 10
 async def run_scheduled_buys():
     """Called every 4 hours for all active user bots."""
     print("🚀 Starting global buy cycle...")
-    active_bots = await get_all_active_bots()  # returns list of {user_id, api_key, secret_key, etc.}
-    bots=active_bots["active_bots"]
-    if not active_bots:
-        print("⚠️ No active bots found.")
+    active_users= await get_all_active_users()  # returns list of {user_id, api_key, secret_key, etc.}
+    users=active_users["active_users"]
+    if not active_users:
+        print("⚠️ No active User found.")
         return
 
-    for bot in bots:
-        user_id = bot["user_id"]
+    for user in users:
+        user_id = user["user_id"]
+        bot_name=user["bot_name"]
         try:
-            print(f"🤖 Running buy for user {user_id}")
-            await fetch_and_execute_buy(user_id)
+            print(f"🤖 {bot_name} bot is Running buy for user {user_id}")
+            await fetch_and_execute_buy(user_id,bot_name)
         except Exception as e:
             print(f"[⚠️] Error for user {user_id}: {e}")
 

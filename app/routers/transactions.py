@@ -7,19 +7,19 @@ from app.models import Transaction,BotTradeState
 
 router = APIRouter(prefix="/transactions", tags=["Transactions & Logs"])
 
-@router.get("/bot/{bot_id}")
-async def get_bot_transactions(bot_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/bot/{user_id}")
+async def get_bot_transactions(user_id: str, db: AsyncSession = Depends(get_db)):
     """
     Fetch all transactions (BUY/SELL) for a specific bot by bot_id.
     """
     try:
         result = await db.execute(
-            select(Transaction).where(Transaction.bot_id == bot_id).order_by(Transaction.buy_time.desc())
+            select(Transaction).where(Transaction.bot_id == user_id).order_by(Transaction.buy_time.desc())
         )
         transactions = result.scalars().all()
 
         if not transactions:
-            return JSONResponse(content={"success": True, "bot_id": bot_id, "transactions": []})
+            return JSONResponse(content={"success": True, "bot_id": user_id, "transactions": []})
 
         # Convert to dict for JSONResponse
         transactions_list = []
@@ -45,21 +45,21 @@ async def get_bot_transactions(bot_id: str, db: AsyncSession = Depends(get_db)):
                 "updated_at": t.updated_at.isoformat() if t.updated_at else None,
             })
 
-        return JSONResponse(content={"success": True, "bot_id": bot_id, "transactions": transactions_list})
+        return JSONResponse(content={"success": True, "user_id": user_id, "transactions": transactions_list})
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching transactions: {e}")
     
 
-@router.get("/trade_logs/{bot_id}")
-async def get_bot_current_state(bot_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/trade_logs/{user_id}")
+async def get_bot_current_state(user_id: str, db: AsyncSession = Depends(get_db)):
     """
     Fetch the current working state of a bot.
     """
     try:
         result = await db.execute(
             select(BotTradeState)
-            .where(BotTradeState.bot_id == bot_id)
+            .where(BotTradeState.bot_id == user_id)
             .order_by(BotTradeState.updated_at.desc())
         )
         states = result.scalars().all()
