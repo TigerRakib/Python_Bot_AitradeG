@@ -9,6 +9,11 @@ import asyncio
 from app.routers.bot_manager import router as bot_manager_router, get_all_active_users
 from app.routers.calculate import fetch_and_execute_buy
 from app.routers.transactions import router as transactions_logs
+
+from app.database import async_session
+from app.models import Bot 
+from sqlalchemy.future import select
+
 app = FastAPI(title="Multi-User Trading Bot")
 
 app.include_router(bot_manager_router)
@@ -31,20 +36,39 @@ BUY_MINUTE = 10
 async def run_scheduled_buys():
     """Called every 4 hours for all active user bots."""
     print("🚀 Starting global buy cycle...")
-    active_users= await get_all_active_users()  # returns list of {user_id, api_key, secret_key, etc.}
-    users=active_users["active_users"]
-    if not active_users:
-        print("⚠️ No active User found.")
-        return
 
-    for user in users:
-        user_id = user["user_id"]
-        bot_name=user["bot_name"]
+    # 1) Load all active bots
+    async with async_session() as db:
+        result = await db.execute(select(Bot).where(Bot.active == True))
+        bots = result.scalars().all()
+
+        if not bots:
+            print("⚠️ No active user found.")
+            return
+        
+        # 2) Mark all these bots as running=True at the start of the cycle
+        for b in bots:
+            b.running = True
+        await db.commit()
+
+    # 3) Execute the strategy for each bot
+    for b in bots:
+        user_id = b.user_id
+        bot_name = b.bot_name
         try:
-            print(f"🤖 {bot_name} bot is Running buy for user {user_id}")
-            await fetch_and_execute_buy(user_id,bot_name)
+            print(f"🤖 {bot_name} bot is running buy for user {user_id}")
+            # if your function accepts both: await fetch_and_execute_buy(user_id, bot_name)
+            await fetch_and_execute_buy(user_id, bot_name)
         except Exception as e:
             print(f"[⚠️] Error for user {user_id}: {e}")
+        finally:
+            # 4) Flip running=False for this bot after its scheduled run finishes
+            async with async_session() as db:
+                res = await db.execute(select(Bot).where(Bot.user_id == user_id))
+                bot_row = res.scalar_one_or_none()
+                if bot_row:
+                    bot_row.running = False
+                    await db.commit()
 
     print("✅ Finished all scheduled buys.")
 

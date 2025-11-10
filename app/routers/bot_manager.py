@@ -93,8 +93,6 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No active user found for this bot")
     else:
         bot_name=user_record.bot_name
-        if not user_record.running:
-            raise HTTPException(status_code=404, detail="This bot is already stopped!")
     # 2) Try to sell the most recent filled BUY for this user
     print(f"🟡 Checking for open positions before stopping {bot_name} (user {user_id})...")
     result = await db.execute(
