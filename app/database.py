@@ -5,7 +5,7 @@ from sqlalchemy.orm import declarative_base
 DATABASE_URL = "postgresql+asyncpg://postgres:arbigobot123@127.0.0.1:5432/mytradegenius"
 
 # Create async engine
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=False)
 
 # Create async session
 async_session = async_sessionmaker(
