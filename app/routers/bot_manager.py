@@ -1,13 +1,13 @@
 # app/routers/bot_manager.py
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Bot
+from app.models import Bot,Transaction
 from sqlalchemy.future import select
 from app import models, schemas
-from app.database import get_db
+from app.database import async_session,get_db
 import asyncio
-from app.routers.calculate import fetch_and_execute_buy
+from app.routers.calculate import fetch_and_execute_buy,execute_sell
 router = APIRouter(prefix="/bots", tags=["Bot Manager"])
 
 # Example in-memory store
@@ -46,29 +46,29 @@ async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     """
     Start the bot manually for a user — only if it exists in the bots table.
     """
-    # 1️⃣ Check if the bot exists in DB
+    # 1 Check if the bot exists in DB
     result = await db.execute(select(Bot).where(Bot.user_id == user_id))
     bot_record = result.scalar_one_or_none()
 
     if not bot_record:
         raise HTTPException(status_code=404, detail="❌ Bot not found in database")
 
-    # 2️⃣ Check if bot is already running in memory
+    # 2️ Check if bot is already running in memory
     bot = USER_BOTS.get(user_id)
     if bot and bot["running"]:
         return {"message": f"⚙️ Bot already running for {user_id}"}
 
-    # 3️⃣ Create new bot entry in memory if needed
+    # 3️ Create new bot entry in memory if needed
     if not bot:
         USER_BOTS[user_id] = {"running": False, "task": None}
         bot = USER_BOTS[user_id]
 
-    # 4️⃣ Start async task
+    # 4️ Start async task
     bot["running"] = True
     task = asyncio.create_task(fetch_and_execute_buy(user_id))
     bot["task"] = task
 
-    # 5️⃣ Update DB (mark running=True)
+    # 5️ Update DB (mark running=True)
     bot_record.running = True
     await db.commit()
 
@@ -80,23 +80,71 @@ async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
 async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     """
     Stop a running bot manually for a given user.
+    Before stopping, automatically sell any open (BUY) positions.
     """
+    # Find the bot
     result = await db.execute(select(Bot).where(Bot.user_id == user_id))
     bot_record = result.scalar_one_or_none()
 
     if not bot_record or not bot_record.running:
         raise HTTPException(status_code=404, detail="❌ No active bot found for this user")
 
-    # Mark as stopped in DB
+    print(f"🟡 Checking for open positions before stopping {user_id}...")
+
+    # Find latest open BUY trade for this user
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.side == "BUY")
+        .where(Transaction.status == "Filled")
+        .order_by(Transaction.buy_time.desc())
+    )
+    trade = result.scalars().first()
+
+    if trade:
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://api.binance.com/api/v3/ticker/price?symbol={trade.asset}"
+                )
+                current_price = float(resp.json()["price"])
+
+            await execute_sell(
+                reason="🛑 Manual Bot Stop",
+                price=current_price,
+                time_=datetime.utcnow(),
+                symbol=trade.asset,
+                entry_price=trade.buy_price,
+            )
+            print(f"✅ Sold {trade.asset} before stopping {user_id}")
+            
+            # Update transaction
+            trade.sell_price = current_price
+            trade.sell_time = datetime.utcnow()
+            trade.side = "SELL"
+            trade.status = "COMPLETED"
+            trade.profit = round((current_price - trade.buy_price) * trade.quantity - trade.exchange_fees, 8)
+            await db.commit()
+        except Exception as e:
+            print(f"⚠️ Error while selling before stopping bot: {e}")
+
+    # Mark bot as stopped
     bot_record.running = False
     await db.commit()
 
-    return {"message": f"🛑 Bot stopped for {user_id}"}
+    return {"message": f"🛑 Bot stopped for {user_id} (any open positions sold)"}
+
+# Internal helper (can be called from anywhere)
+async def fetch_all_active_bots():
+    async with async_session() as db:
+        query = select(Bot).where(Bot.active == True)
+        result = await db.execute(query)
+        bots = result.scalars().all()
+        return [{"user_id": b.user_id, "api_key": b.api_key, "secret_key": b.secret_key} for b in bots]
 
 
+# FastAPI route
 @router.get("/active")
-async def get_all_active_bots():
-    """
-    Return all active bots (for the scheduler)
-    """
-    return [bot for bot in USER_BOTS.values() if bot["active"]]
+async def get_all_active_bots(db: AsyncSession = Depends(get_db)):
+    bots = await fetch_all_active_bots()
+    return {"count": len(bots), "active_bots": bots}

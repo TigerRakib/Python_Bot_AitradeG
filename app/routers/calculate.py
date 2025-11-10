@@ -9,21 +9,22 @@ import hashlib
 import urllib.parse
 from datetime import datetime, timezone
 import os, random
-from app.models import Transaction
-from app.database import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.routers.trading_bot import get_buy_signals
 from dotenv import load_dotenv
-from app.models import BotTradeState
-from sqlalchemy import select
+
+from app.models import Transaction, BotTradeState
+from app.database import async_session
+from app.routers.trading_bot import get_buy_signals
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 router = APIRouter(prefix="/Python-BOT", tags=["Python-bot"])
-TESTNET = True  # 🧪 True = Binance Testnet, False = Live trading
-load_dotenv()  
+
+TESTNET = True
+load_dotenv()
+
 if TESTNET:
     BINANCE_BASE_URL = "https://testnet.binance.vision"
     print("🧪 Running in TESTNET mode (no real funds).")
@@ -36,21 +37,19 @@ API_SECRET = os.getenv("API_SECRET")
 API_BASE = "https://backend.mytradegenius.com/binance_prices/latest_5m"
 WS_URL = "wss://stream.binance.com:9443/stream?streams="
 
-SLEEP_INTERVAL = 5           # seconds between TSL loops
-WS_BATCH_SIZE = 200          # max streams per WebSocket
+SLEEP_INTERVAL = 5
+WS_BATCH_SIZE = 200
 ENTRY_PRICE_UPDATE_HOURS = {1, 5, 9, 13, 17, 21}
 ENTRY_PRICE_UPDATE_MINUTE = 10
 MULTIPLIER = 3.5
 
-# ============================================================
-# GLOBAL STATE
-# ============================================================
+ENTRY_PRICES = {}
+ATR_CACHE = {}
+LATEST_DATA = {}
+TRADE_LOGS = []
+BOUGHT_SYMBOLS = set()
+symbol_state = {}
 
-
-ENTRY_PRICES = {}     # symbol → entry price
-ATR_CACHE = {}        # symbol → {"atr": float, "updated_at": timestamp}
-LATEST_DATA = {}      # symbol → {"price": float, "last_update": datetime}
-print(ENTRY_PRICES)
 # ============================================================
 # BINANCE API WRAPPER
 # ============================================================
@@ -59,16 +58,12 @@ async def get_server_time():
         async with session.get("https://api.binance.com/api/v3/time") as res:
             data = await res.json()
             return data["serverTime"]
-        
+
 async def binance_request(method: str, path: str, params=None, signed=False):
-    """
-    Async Binance HTTP request supporting both Live and Testnet.
-    """
     if params is None:
         params = {}
-
     if signed:
-        server_time = await get_server_time()  # 🔹 sync Binance server time
+        server_time = await get_server_time()
         params["timestamp"] = server_time
         params["recvWindow"] = 5000
         query = urllib.parse.urlencode(params)
@@ -91,12 +86,33 @@ async def binance_request(method: str, path: str, params=None, signed=False):
             return {"status": 0, "data": str(e)}
 
 # ============================================================
+# DATABASE HELPERS
+# ============================================================
+async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(BotTradeState)
+                .where(BotTradeState.bot_id == bot_id)
+                .where(BotTradeState.asset == symbol)
+            )
+            state = result.scalars().first()
+
+            if state:
+                state.action = action
+                state.logs = logs
+            else:
+                db.add(BotTradeState(bot_id=bot_id, asset=symbol, action=action, logs=logs))
+
+            await db.commit()
+        print(f"📊 Bot state updated → {bot_id} | {symbol} | {action} | {logs}")
+    except Exception as e:
+        print(f"[STATE ERROR] Failed to update bot state for {symbol}: {e}")
+
+# ============================================================
 # TRADE EXECUTION
 # ============================================================
-TRADE_LOGS = []  # List to store completed trade summaries
-BOUGHT_SYMBOLS = set()
-
-async def execute_buy(user_id,reason, price, time_, symbol, entry_amount=50, timeline=None, db: AsyncSession = None):
+async def execute_buy(user_id, reason, price, time_, symbol, entry_amount=50, timeline=None):
     try:
         quantity = round(entry_amount // price, 5)
         payload = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": quantity}
@@ -124,38 +140,32 @@ async def execute_buy(user_id,reason, price, time_, symbol, entry_amount=50, tim
             created_at=datetime.utcnow(),
         )
 
-        async for db in get_db():
+        async with async_session() as db:
             db.add(new_trade)
             await db.commit()
-            break
 
         print(f"✅ [BUY SUCCESS] {symbol} stored in database.")
         await update_bot_state(user_id, symbol, "HOLD", f"Holding position at entry {price:.5f}")
     except Exception as e:
         print(f"❌ Binance BUY failed for {symbol}: {e}")
 
-async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=50, timeline=None, db: AsyncSession = None):
+async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=50):
     try:
         quantity = round(entry_amount // entry_price, 5)
         payload = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": quantity}
 
         print(f"🔴 [SELL INITIATED] {symbol} @ {price:.5f} | Qty: {quantity} | Reason: {reason}")
-        res = await binance_request("POST", "/api/v3/order", payload, signed=True)
+        await binance_request("POST", "/api/v3/order", payload, signed=True)
 
-        # --- Calculate profit and exchange fees ---
         sell_fee = round(price * quantity * 0.00055, 8)
         profit = round((price - entry_price) * quantity - sell_fee, 8)
 
-        # --- Use provided DB session or create one ---
-        session = db or async_session()
-
-        async with session as s:
-            # Find the most recent BUY trade for this symbol
-            result = await s.execute(
+        async with async_session() as db:
+            result = await db.execute(
                 select(Transaction)
                 .where(Transaction.asset == symbol)
                 .where(Transaction.side == "BUY")
-                .where(Transaction.status == "COMPLETED")
+                .where(Transaction.status == "Filled")
                 .order_by(Transaction.buy_time.desc())
             )
             trade = result.scalars().first()
@@ -164,22 +174,20 @@ async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=5
                 print(f"⚠️ No matching BUY trade found for {symbol}")
                 return
 
-            # Update the existing transaction
             trade.sell_price = price
             trade.sell_time = datetime.utcnow()
             trade.side = "SELL"
             trade.status = "COMPLETED"
             trade.profit = profit
             trade.reason = reason
-            trade.exchange_fees += sell_fee  # Add sell fee
+            trade.exchange_fees += sell_fee
 
-            await s.commit()
+            await db.commit()
 
-            print(f"💰 [SELL SUCCESS] {symbol} | Profit: {profit:.2f} USDT")
-            await update_bot_state(trade.bot_id, symbol, "SOLD", f"Sold at {price:.5f} | Profit: {profit:.2f}")
+        print(f"💰 [SELL SUCCESS] {symbol} | Profit: {profit:.2f} USDT")
     except Exception as e:
         print(f"❌ [SELL FAILED] {symbol}: {e}")
-        await update_bot_state(trade.bot_id, symbol, "ERROR", f"Sell failed: {e}")
+
 # ============================================================
 # ATR CALCULATION
 # ============================================================
@@ -279,7 +287,7 @@ async def websocket_collector(symbols):
         tasks.append(ws_worker(batch))
     await asyncio.gather(*tasks)
 symbol_state={}
-async def process_symbol(session, symbol, entry, price_info, elapsed_min):
+async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3):
     try:
         price = price_info["price"]
         profit_pct = (price / entry) - 1
@@ -309,100 +317,129 @@ async def process_symbol(session, symbol, entry, price_info, elapsed_min):
 
         change_pct = ((price - entry) / entry) * 100
         current_time = datetime.utcnow()
-
-        # ==============================================================
-        # Condition 7: Hard Stop (-2%) after 10 mins
-        # ==============================================================
-        if elapsed_min > 10 and price <= entry * 0.98:
-            await execute_sell("Hard Stop (-2%) after 10 mins", price, current_time, symbol, entry)
-            return
-
-        # ==============================================================
-        # Phase 1 — Before 200 mins
-        # ==============================================================
-        if elapsed_min <= 200:
-
-            # Condition 1: TP1 (1.2%)
+        if all_3:
             if change_pct >= 1.2:
-                await execute_sell("TP1 (+1.2%) before 200 mins", price, current_time, symbol, entry)
-                return
+                await execute_sell("TP1 (+1.2%) reached for all three buy signals symbol", price, current_time, symbol, entry)
+                return True
+            elif elapsed_min >= 240:
+                await execute_sell("Force sell at 240 mins of all three buy signals symbol", price, current_time, symbol, entry)
+                return True
+        else:
+            # ==============================================================
+            # Condition 7: Force Stop (-1%) after 200 mins
+            # ==============================================================
+            if elapsed_min > 200 and price <= entry * 0.99:
+                await execute_sell("Force Stop (-1%) after 200 mins", price, current_time, symbol, entry)
+                return True
 
-            # Condition 2: TP2 (fall below +0.5% after going above)
-            if change_pct >= 0.5:
-                state["was_above_half"] = True
-            elif state["was_above_half"] and change_pct < 0.5:
-                await execute_sell("TP2 fallback: Fell below +0.5% after going above before 200 mins", price, current_time, symbol, entry)
-                return
+            # ==============================================================
+            # Phase 1 — Before 200 mins
+            # ==============================================================
+            if elapsed_min <= 200:
 
-        # ==============================================================
-        # Phase 2 — After 200 mins (200–240)
-        # ==============================================================
-        elif 200 < elapsed_min <= 240:
+                # Condition 1: TP1 (1.2%)
+                if change_pct >= 1.2:
+                    await execute_sell("TP1 (+1.2%) before 200 mins", price, current_time, symbol, entry)
+                    return True
 
-            # Condition 3: Gradually reduce TP from 0.5% → 0.2%
-            gradual_tp = 0.5 - ((elapsed_min - 200) / 40) * (0.5 - 0.2)  # Linear fade
-            if change_pct >= gradual_tp:
-                await execute_sell(f"Gradual TP reached ({gradual_tp:.2f}%) after 200 mins", price, current_time, symbol, entry)
-                return
+                # Condition 2: TP2 (fall below +0.5% after going above)
+                if change_pct >= 0.5:
+                    state["was_above_half"] = True
+                elif state["was_above_half"] and change_pct < 0.5:
+                    await execute_sell("TP2 fallback: Fell below +0.5% after going above before 200 mins", price, current_time, symbol, entry)
+                    return True
 
-            # --- TSL-related conditions ---
-            if tsl:
+            # ==============================================================
+            # Phase 2 — After 200 mins (200–240)
+            # ==============================================================
+            elif 200 < elapsed_min <= 240:
 
-                # Condition 4: Sell if falls below TSL after 200 mins
-                if price <= tsl:
-                    await execute_sell("Price fell below TSL after 200 mins", price, current_time, symbol, entry)
-                    return
+                # Condition 3: Gradually reduce TP from 0.5% → 0.2%
+                gradual_tp = 0.5 - ((elapsed_min - 200) / 40) * (0.5 - 0.2)  # Linear fade
+                if change_pct >= gradual_tp:
+                    await execute_sell(f"Gradual TP reached ({gradual_tp:.2f}%) after 200 mins", price, current_time, symbol, entry)
+                    return True
 
-                # Condition 5: Sell when price rises above TSL and falls
-                if price > tsl:
-                    state["tsl_touched"] = True
-                elif state["tsl_touched"] and price < tsl:
-                    await execute_sell("Price rose above TSL and fell after 200 mins", price, current_time, symbol, entry)
-                    return
+                # --- TSL-related conditions ---
+                if tsl:
 
-                # Condition 6: If below TSL, rises near TSL then falls
-                if price < tsl:
-                    if abs(price - tsl) / tsl < 0.001:  # within 0.1%
-                        state["price_near_tsl"] = True
-                    elif state["price_near_tsl"] and price < tsl:
-                        await execute_sell("Price rose near TSL and fell again after 200 mins", price, current_time, symbol, entry)
-                        return
+                    # Condition 4: Sell if falls below TSL after 200 mins
+                    if price <= tsl:
+                        await execute_sell("Price fell below TSL after 200 mins", price, current_time, symbol, entry)
+                        return True
 
-        # ==============================================================
-        # Condition 8: Time-based exit (240 mins)
-        # ==============================================================
-        elif elapsed_min >= 240:
-            await execute_sell("Time-based exit (240 mins)", price, current_time, symbol, entry)
-            return
+                    # Condition 5: Sell when price rises above TSL and falls
+                    if price > tsl:
+                        state["tsl_touched"] = True
+                    elif state["tsl_touched"] and price < tsl:
+                        await execute_sell("Price rose above TSL and fell after 200 mins", price, current_time, symbol, entry)
+                        return True
 
+                    # Condition 6: If below TSL, rises near TSL then falls
+                    if price < tsl:
+                        if abs(price - tsl) / tsl < 0.001:  # within 0.1%
+                            state["price_near_tsl"] = True
+                        elif state["price_near_tsl"] and price < tsl:
+                            await execute_sell("Price rose near TSL and fell again after 200 mins", price, current_time, symbol, entry)
+                            return True
+
+            # ==============================================================
+            # Condition 8: Time-based exit (240 mins)
+            # ==============================================================
+            elif elapsed_min >= 240:
+                await execute_sell("Time-based exit (240 mins)", price, current_time, symbol, entry)
+                return True
+        
         # ==============================================================
         # Save updated state
         # ==============================================================
         symbol_state[symbol] = state
+        return False
     except Exception as e:
         print(f"[PROCESS ERROR] {symbol}: {e}")
-
+        return False
 # ============================================================
 # MAIN TSL MONITOR LOOP
 # ============================================================
 
-async def tsl_monitor(SYMBOLS):
+async def tsl_monitor(symbols, all_3):
     start_time = time.time()
     async with aiohttp.ClientSession() as session:
-        while True:
+        while symbols:  # Run only while we still have active symbols
             loop_start = time.time()
             elapsed_min = (loop_start - start_time) / 60
             tasks = []
 
-            for symbol in SYMBOLS:
+            for symbol in list(symbols):  # iterate over a copy
                 entry = ENTRY_PRICES.get(symbol)
                 price_info = LATEST_DATA.get(symbol)
                 if not entry or not price_info:
                     continue
-                tasks.append(process_symbol(session, symbol, entry, price_info, elapsed_min))
+
+                # Check transaction status
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(Transaction.status).where(
+                            Transaction.asset == symbol,
+                            Transaction.status == "COMPLETED"
+                        )
+                    )
+                    completed = result.scalar_one_or_none()
+                    if completed:
+                        print(f"✅ {symbol} already sold, stopping TSL monitor for it.")
+                        symbols.remove(symbol)
+                        continue
+
+                # If still active, process normally
+                tasks.append(process_symbol(session, symbol, entry, price_info, elapsed_min, all_3))
 
             if tasks:
                 await asyncio.gather(*tasks)
+
+            # Break if no active symbols left
+            if not symbols:
+                print("🛑 All trades completed. Stopping TSL monitor.")
+                break
 
             loop_end = time.time()
             sleep_time = max(0, SLEEP_INTERVAL - (loop_end - loop_start))
@@ -443,6 +480,8 @@ async def fetch_and_execute_buy(user_id: str):
         print("DEBUG: Raw buy signals:", buy_signals)
         strong_buy_symbols = buy_signals.get("strong_buy", [])
         print(f"🎯 Strong Buy Symbols: {strong_buy_symbols}")
+        buy_all_signals=buy_signals.get("all_3", [])
+        print(f"ALL three signals : {buy_all_signals}")
     except Exception as e:
         print(f"[⚠️] Error fetching strong buy signals: {e}")
         strong_buy_symbols = []
@@ -454,7 +493,9 @@ async def fetch_and_execute_buy(user_id: str):
     # --- 🎲 Pick one token randomly ---
     symbol = random.choice(strong_buy_symbols)
     print(f"🎯 Randomly selected symbol for this run: {symbol}")
-
+    all_3=False
+    if symbol in buy_all_signals:
+        all_3=True
     # Start WebSocket collector for that token
     asyncio.create_task(websocket_collector([symbol]))
     print(f"🔌 WebSocket collector started for {symbol}")
@@ -479,45 +520,10 @@ async def fetch_and_execute_buy(user_id: str):
     print(f"⚡ BUY executed for {symbol} at {entry_price:.5f} | {datetime.utcnow().strftime('%H:%M:%S')} UTC")
 
     # Start TSL monitor for this symbol only
-    asyncio.create_task(tsl_monitor({symbol}))
+    asyncio.create_task(tsl_monitor({symbol},all_3))
     print(f"⏱️ TSL monitor started for {symbol}")
     await update_bot_state(user_id, symbol, "MONITORING", f"Monitoring active trade at {entry_price:.5f}")
 
-
-
-async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
-    """
-    Updates or inserts the current working state of a bot for a given symbol.
-    """
-    try:
-        async for db in get_db():
-            # Try to find existing state
-            result = await db.execute(
-                select(BotTradeState)
-                .where(BotTradeState.bot_id == bot_id)
-                .where(BotTradeState.asset == symbol)
-            )
-            state = result.scalars().first()
-
-            if state:
-                # Update existing record
-                state.action = action
-                state.logs = logs
-            else:
-                # Create a new one
-                state = BotTradeState(
-                    bot_id=bot_id,
-                    asset=symbol,
-                    action=action,
-                    logs=logs
-                )
-                db.add(state)
-
-            await db.commit()
-            break
-        print(f"📊 Bot state updated → {bot_id} | {symbol} | {action} | {logs}")
-    except Exception as e:
-        print(f"[STATE ERROR] Failed to update bot state for {symbol}: {e}")
 
 @router.get("/trade-logs")
 async def get_trade_logs():

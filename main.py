@@ -32,12 +32,12 @@ async def run_scheduled_buys():
     """Called every 4 hours for all active user bots."""
     print("🚀 Starting global buy cycle...")
     active_bots = await get_all_active_bots()  # returns list of {user_id, api_key, secret_key, etc.}
-
+    bots=active_bots["active_bots"]
     if not active_bots:
         print("⚠️ No active bots found.")
         return
 
-    for bot in active_bots:
+    for bot in bots:
         user_id = bot["user_id"]
         try:
             print(f"🤖 Running buy for user {user_id}")

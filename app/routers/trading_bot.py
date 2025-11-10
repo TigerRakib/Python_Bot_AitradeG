@@ -97,31 +97,35 @@ async def get_buy_signals() -> Dict[str, Any]:
             seen[sym]["technicalIndicators5minBuy"] = True
 
     combined_data = sorted(seen.values(), key=lambda x: x.get("asset_name", ""))
-
+    # print(combined_data)
     # --- Strong Buy (at least 2 sources) ---
-    strong_buy_signals = [
-        item for item in combined_data
-        if sum([
+    appear_all=[]
+    strong_buy_signals = []
+    for item in combined_data:
+        count= sum([
             item["isPredictionBuy"],
             item["isSimplePredictionBuy"],
-            item["technicalIndicators5minBuy"],
-        ]) >= 2
-    ]
-
+            item["technicalIndicators5minBuy"],]
+        )
+        if count>=2:
+            strong_buy_signals.append(item)
+        if count==3:
+            appear_all.append(item["symbol"]+"USDT")
+    # print(appear_all)
     SYMBOLS = [s["symbol"] + "USDT" for s in strong_buy_signals]
     return {
         "strong_buy": SYMBOLS,
+        "all_3":appear_all,
         }
 
 
 
 # async def main():
 #     results = await get_buy_signals()
-#     strong_buy_tokens = [s["symbol"] for s in results["strong_buy_signals"]]
-
+#     strong_buy_tokens = [s["symbol"] for s in results["strong_buy"]]
+#     print(strong_buy_tokens)
 #     print("\n✅ Strong Buy Tokens:")
 #     print(", ".join(strong_buy_tokens))
-#     print("\n📊 Summary:", results["counts"])
 
 # asyncio.run(main())
 
