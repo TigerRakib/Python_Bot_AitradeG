@@ -1,6 +1,7 @@
 # app/routers/bot_manager.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException,Query
 from datetime import datetime, timedelta
+from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_
 from sqlalchemy.future import select
@@ -26,8 +27,6 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Bot already exists for this user")
     
-    start_time = datetime.utcnow()
-    end_time = start_time + timedelta(days=bot.duration_days)
     new_bot = Bot(
         user_id=bot.user_id,
         bot_name=bot.bot_name,
@@ -35,8 +34,8 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
         secret_key=bot.secret_key,
         active=True,
         running=False,
-        start_time=start_time,
-        end_time=end_time,
+        start_time=None,
+        end_time=None,
     )
     db.add(new_bot)
 
@@ -52,11 +51,15 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
 
 # Start Bot (by user)
 @router.post("/start/{user_id}")
-async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
+async def start_bot(user_id: str,duration_days: int = Query(..., description="Bot duration in days, must be 2 or 7"), db: AsyncSession = Depends(get_db)):
     """
     Start a bot for a specific user & bot_name if it exists.
     Marks the DB record as running and launches the async task.
     """
+    # Validate duration_days
+    if duration_days not in (2, 7):
+        raise HTTPException(status_code=422, detail="duration_days must be 2 or 7")
+
     # 1) Ensure bot exists and is active
     result = await db.execute(
         select(Bot).where(and_(Bot.user_id == user_id))
@@ -69,15 +72,30 @@ async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
         bot_name=user_record.bot_name
     if user_record.running:
         raise HTTPException(status_code=400, detail=" User Bot is running currently")
-    
+    start_time = datetime.utcnow()
+    end_time = start_time + timedelta(days=duration_days)
     asyncio.create_task(fetch_and_execute_buy(user_id,bot_name))
     
 
     # 5) Mark DB record running
     user_record.running = True
+    user_record.start_time = start_time
+    user_record.end_time = end_time
+
     await db.commit()
 
-    return {"message": f"🚀 Bot '{bot_name}' started successfully for user {user_id}"}
+    return {
+        "success": True,
+        "message": f"Bot '{user_record.bot_name}' started for user {user_record.user_id}",
+        "bot": {
+            "_id": str(user_record.id),
+            "userId": str(user_record.user_id),
+            "botName": user_record.bot_name,
+            "isActive": user_record.active,
+            "startTime": user_record.start_time.isoformat(),
+            "endTime": user_record.end_time.isoformat()
+        }
+    }
 
 
 # 🛑 Stop Bot (by user)
