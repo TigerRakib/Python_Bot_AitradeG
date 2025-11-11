@@ -164,6 +164,32 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
 
     return {"message": f"🛑 Bot '{bot_name}' stopped for user {user_id} (any open positions sold)"}
 
+
+@router.get("/bot_status/{user_id}")
+async def get_bot_status(user_id: str,db: AsyncSession = Depends(get_db)):
+    """
+    Get bot's details.
+    """
+    result = await db.execute(select(Bot).where(Bot.user_id == user_id))
+    bots = result.scalars().all()
+
+    bot_list = []
+    for bot in bots:
+        bot_list.append({
+            "_id": str(bot.user_id),
+            "userId": str(bot.user_id),
+            "botName": bot.bot_name,
+            "isActive": bot.active,
+            "startTime": bot.start_time.isoformat() if bot.start_time else None,
+            "endTime": bot.end_time.isoformat() if bot.end_time else None,
+        })
+
+    return {
+        "success": True,
+        "count": len(bot_list),
+        "bots": bot_list
+    }
+
 # Internal helper (can be called from anywhere)
 async def fetch_all_active_users():
     """
