@@ -1,6 +1,6 @@
 # app/routers/bot_manager.py
 from fastapi import APIRouter, Depends, HTTPException
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import and_
 from sqlalchemy.future import select
@@ -25,7 +25,9 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
     result = await db.execute(select(Bot).where(Bot.user_id == bot.user_id))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Bot already exists for this user")
-
+    
+    start_time = datetime.utcnow()
+    end_time = start_time + timedelta(days=bot.duration_days)
     new_bot = Bot(
         user_id=bot.user_id,
         bot_name=bot.bot_name,
@@ -33,6 +35,8 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
         secret_key=bot.secret_key,
         active=True,
         running=False,
+        start_time=start_time,
+        end_time=end_time,
     )
     db.add(new_bot)
 
@@ -46,7 +50,7 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
     return {"message": f"✅ Bot '{new_bot.bot_name}' created for user {new_bot.user_id}"}
 
 
-# ✅ Start Bot (by user + bot name)
+# Start Bot (by user)
 @router.post("/start/{user_id}")
 async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     """
@@ -76,7 +80,7 @@ async def start_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     return {"message": f"🚀 Bot '{bot_name}' started successfully for user {user_id}"}
 
 
-# 🛑 Stop Bot (by user + bot name)
+# 🛑 Stop Bot (by user)
 @router.post("/stop/{user_id}")
 async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     """
@@ -97,7 +101,7 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     print(f"🟡 Checking for open positions before stopping {bot_name} (user {user_id})...")
     result = await db.execute(
         select(Transaction)
-        .where(Transaction.bot_id == user_id)           # <-- ensure it's this user's trade
+        .where(Transaction.bot_id == user_id)           
         .where(Transaction.side == "BUY")
         .where(Transaction.status == "Filled")
         .order_by(Transaction.buy_time.desc())

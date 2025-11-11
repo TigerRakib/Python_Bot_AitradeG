@@ -287,7 +287,7 @@ async def websocket_collector(symbols):
         tasks.append(ws_worker(batch))
     await asyncio.gather(*tasks)
 symbol_state={}
-async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3):
+async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3,bot_name,user_id):
     try:
         price = price_info["price"]
         profit_pct = (price / entry) - 1
@@ -301,7 +301,7 @@ async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3):
         tp2 = entry * 1.005
 
         print(
-            f"[{datetime.utcnow():%H:%M:%S}] {symbol} | Price: {price:.5f} | "
+            f"{user_id} | {bot_name} | [{datetime.utcnow():%H:%M:%S}] {symbol} | Price: {price:.5f} | "
             f"TSL: {tsl:.5f} | TP1: {tp1:.5f} | TP2: {tp2:.5f} | "
             f"Profit: {profit_pct*100:.3f}% | Time: {elapsed_min:.1f}m"
         )
@@ -402,7 +402,7 @@ async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3):
 # MAIN TSL MONITOR LOOP
 # ============================================================
 
-async def tsl_monitor(symbols, all_3):
+async def tsl_monitor(symbols, all_3,bot_name,user_id):
     start_time = time.time()
     async with aiohttp.ClientSession() as session:
         while symbols:  # Run only while we still have active symbols
@@ -431,7 +431,7 @@ async def tsl_monitor(symbols, all_3):
                         continue
 
                 # If still active, process normally
-                tasks.append(process_symbol(session, symbol, entry, price_info, elapsed_min, all_3))
+                tasks.append(process_symbol(session, symbol, entry, price_info, elapsed_min, all_3,bot_name,user_id))
 
             if tasks:
                 await asyncio.gather(*tasks)
@@ -477,7 +477,7 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
     print(f"Executing buy for user {user_id}")
     try:
         buy_signals = await get_buy_signals()
-        print("DEBUG: Raw buy signals:", buy_signals)
+        # print("DEBUG: Raw buy signals:", buy_signals)
         strong_buy_symbols = buy_signals.get("strong_buy", [])
         print(f"🎯 Strong Buy Symbols: {strong_buy_symbols}")
         buy_all_signals=buy_signals.get("all_3", [])
@@ -490,7 +490,7 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
         print("⚠️ No strong buy symbols found.")
         return
 
-    # --- 🎲 Pick one token randomly ---
+    # Pick one token randomly
     symbol = random.choice(strong_buy_symbols)
     print(f"🎯 Randomly selected symbol for this run: {symbol}")
     all_3=False
@@ -521,7 +521,7 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
     print(f"⚡ BUY executed for {symbol} at {entry_price:.5f} | {datetime.utcnow().strftime('%H:%M:%S')} UTC")
 
     # Start TSL monitor for this symbol only
-    asyncio.create_task(tsl_monitor({symbol},all_3))
+    asyncio.create_task(tsl_monitor({symbol},all_3,bot_name,user_id))
     print(f"⏱️ TSL monitor started for {symbol}")
     await update_bot_state(user_id, symbol, "MONITORING", f"Monitoring active trade at {entry_price:.5f}")
 

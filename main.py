@@ -72,6 +72,21 @@ async def run_scheduled_buys():
 
     print("✅ Finished all scheduled buys.")
 
+# Root endpoint
+@app.get("/")
+def read_root():
+    return {
+        "message": "Python-Bot IS RUNNING",
+        "status": "OK",
+        "backend": "MYTRADEGENIUS Backend",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+# Health check endpoint
+@app.get("/health")
+def health_check():
+    return {"status": "healthy"}
 
 # ==========================
 # Startup Event

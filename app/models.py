@@ -14,6 +14,8 @@ class Bot(Base):
     secret_key = Column(String, nullable=False)
     active = Column(Boolean, default=True)
     running = Column(Boolean, default=False)
+    start_time = Column(DateTime, default=datetime.utcnow)
+    end_time = Column(DateTime, nullable=True)
     __table_args__ = (
         UniqueConstraint("user_id", name="uq_bots_user_id"),
     )
