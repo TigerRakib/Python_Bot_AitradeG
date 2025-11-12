@@ -94,7 +94,7 @@ def health_check():
 @app.on_event("startup")
 async def startup_event():
     # Run immediately at startup
-    asyncio.create_task(run_scheduled_buys())
+    # asyncio.create_task(run_scheduled_buys())
 
     # Schedule every 4 hours
     scheduler.add_job(
