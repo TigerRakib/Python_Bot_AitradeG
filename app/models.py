@@ -12,7 +12,7 @@ class Bot(Base):
     user_id = Column(String, primary_key=True, index=True)
     api_key = Column(String, nullable=False)
     secret_key = Column(String, nullable=False)
-    active = Column(Boolean, default=True)
+    active = Column(Boolean, default=False)
     running = Column(Boolean, default=False)
     start_time = Column(DateTime, nullable=True)
     end_time = Column(DateTime, nullable=True)

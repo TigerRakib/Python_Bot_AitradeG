@@ -32,7 +32,7 @@ async def create_bot(bot: schemas.BotCreate, db: AsyncSession = Depends(get_db))
         bot_name=bot.bot_name,
         api_key=bot.api_key,
         secret_key=bot.secret_key,
-        active=True,
+        active=False,
         running=False,
         start_time=None,
         end_time=None,
@@ -78,6 +78,7 @@ async def start_bot(user_id: str,duration_days: int = Query(..., description="Bo
     
 
     # 5) Mark DB record running
+    user_record.active=True
     user_record.running = True
     user_record.start_time = start_time
     user_record.end_time = end_time
@@ -115,6 +116,8 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No active user found for this bot")
     else:
         bot_name=user_record.bot_name
+        if not user_record.running:
+            return {"message": f"🛑 Bot '{bot_name}' is already stopped for user {user_id}"}
     # 2) Try to sell the most recent filled BUY for this user
     print(f"🟡 Checking for open positions before stopping {bot_name} (user {user_id})...")
     result = await db.execute(
@@ -125,7 +128,6 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
         .order_by(Transaction.buy_time.desc())
     )
     trade = result.scalars().first()
-
     if trade:
         try:
             import httpx
@@ -157,12 +159,13 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
             await db.commit()
         except Exception as e:
             print(f"⚠️ Error while selling before stopping bot: {e}")
-
+        
+    
     # 4) Mark DB record stopped
     user_record.running = False
     await db.commit()
-
     return {"message": f"🛑 Bot '{bot_name}' stopped for user {user_id} (any open positions sold)"}
+    
 
 
 @router.get("/bot_status/{user_id}")
@@ -216,4 +219,26 @@ async def get_all_active_users(_: AsyncSession = Depends(get_db)):
     return {
         "active_user_count": len(active_users),
         "active_users": active_users,
+    }
+
+# 🗑️ Delete Bot by user_id
+@router.delete("/delete/{user_id}")
+async def delete_bot(user_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Delete a bot for a specific user_id.
+    - Removes the bot record from the database.
+    - If the bot does not exist, returns 404.
+    """
+    result = await db.execute(select(Bot).where(Bot.user_id == user_id))
+    bot = result.scalar_one_or_none()
+
+    if not bot:
+        raise HTTPException(status_code=404, detail=f"No bot found for user_id: {user_id}")
+
+    await db.delete(bot)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": f"🗑️ Bot '{bot.bot_name}' for user '{user_id}' has been deleted successfully."
     }
