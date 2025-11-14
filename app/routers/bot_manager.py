@@ -163,6 +163,7 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     
     # 4) Mark DB record stopped
     user_record.running = False
+    user_record.active = False
     await db.commit()
     return {"message": f"🛑 Bot '{bot_name}' stopped for user {user_id} (any open positions sold)"}
     
@@ -220,6 +221,25 @@ async def get_all_active_users(_: AsyncSession = Depends(get_db)):
         "active_user_count": len(active_users),
         "active_users": active_users,
     }
+
+@router.get("/running")
+async def get_running_bots(db: AsyncSession = Depends(get_db)):
+
+    results = await db.execute(select(Bot).where(Bot.running == True))
+    
+    # Convert SQLAlchemy models → dict
+    bots = results.scalars().all()  # <-- This returns real Bot model objects
+
+    response = []
+    for bot in bots:
+        response.append({
+            "user_id": bot.user_id,
+            "active": bot.active,
+            "running": bot.running
+        })
+
+    return response
+
 
 # 🗑️ Delete Bot by user_id
 @router.delete("/delete/{user_id}")
