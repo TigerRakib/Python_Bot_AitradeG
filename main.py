@@ -1,5 +1,6 @@
 # app/main.py
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -15,6 +16,14 @@ from app.models import Bot
 from sqlalchemy.future import select
 
 app = FastAPI(title="Multi-User Trading Bot")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(bot_manager_router)
 app.include_router(transactions_logs)
