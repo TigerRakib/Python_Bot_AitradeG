@@ -23,7 +23,7 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id = Column(String, primary_key=True, index=True)
-    bot_id = Column(String, index=True)
+    user_id = Column(String, index=True)
     bot_name = Column(String)
     side = Column(Enum("BUY", "SELL", name="trade_side"))
     status = Column(Enum("Filled", "COMPLETED", name="trade_status"), default="Filled")

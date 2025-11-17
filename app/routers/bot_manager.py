@@ -11,7 +11,6 @@ from app import schemas
 from app.database import async_session, get_db
 import asyncio
 from app.routers.calculate import fetch_and_execute_buy, execute_sell
-
 router = APIRouter(prefix="/bots", tags=["Bot Manager"])
 
 
@@ -122,7 +121,7 @@ async def stop_bot(user_id: str, db: AsyncSession = Depends(get_db)):
     print(f"🟡 Checking for open positions before stopping {bot_name} (user {user_id})...")
     result = await db.execute(
         select(Transaction)
-        .where(Transaction.bot_id == user_id)           
+        .where(Transaction.user_id == user_id)           
         .where(Transaction.side == "BUY")
         .where(Transaction.status == "Filled")
         .order_by(Transaction.buy_time.desc())
@@ -262,3 +261,4 @@ async def delete_bot(user_id: str, db: AsyncSession = Depends(get_db)):
         "success": True,
         "message": f"🗑️ Bot '{bot.bot_name}' for user '{user_id}' has been deleted successfully."
     }
+

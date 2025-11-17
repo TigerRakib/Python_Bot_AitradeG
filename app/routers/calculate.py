@@ -13,10 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from dotenv import load_dotenv
 
-from app.models import Transaction, BotTradeState
+from app.models import Bot,Transaction, BotTradeState
 from app.database import async_session
 from app.routers.trading_bot import get_buy_signals
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -57,7 +56,7 @@ async def get_server_time():
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.binance.com/api/v3/time") as res:
             data = await res.json()
-            return data["serverTime"]
+            return data ["serverTime"]
 
 async def binance_request(method: str, path: str, params=None, signed=False):
     if params is None:
@@ -112,7 +111,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
 # ============================================================
 # TRADE EXECUTION
 # ============================================================
-async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amount=50, timeline=None):
+async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amount=1000, timeline=None):
     try:
         quantity = round(entry_amount // price, 5)
         payload = {"symbol": symbol, "side": "BUY", "type": "MARKET", "quantity": quantity}
@@ -127,7 +126,7 @@ async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amou
 
         new_trade = Transaction(
             id=trade_id,
-            bot_id=user_id,
+            user_id=user_id,
             bot_name=bot_name,
             side="BUY",
             status="Filled",
@@ -149,7 +148,7 @@ async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amou
     except Exception as e:
         print(f"❌ Binance BUY failed for {symbol}: {e}")
 
-async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=50):
+async def execute_sell(reason, price, time_, symbol, entry_price, entry_amount=1000):
     try:
         quantity = round(entry_amount // entry_price, 5)
         payload = {"symbol": symbol, "side": "SELL", "type": "MARKET", "quantity": quantity}
@@ -440,11 +439,11 @@ async def tsl_monitor(symbols, all_3,bot_name,user_id):
             if not symbols:
                 print("🛑 All trades completed. Stopping TSL monitor.")
                 break
-
+            
             loop_end = time.time()
             sleep_time = max(0, SLEEP_INTERVAL - (loop_end - loop_start))
             await asyncio.sleep(sleep_time)
-
+            await auto_stop_bot(user_id)
 async def fetch_entry_prices(symbols: list):
     """
     Capture entry prices from WebSocket live prices at specific hours & minute.
@@ -532,3 +531,52 @@ async def get_trade_logs():
     Fetch all executed trades (buy/sell) as JSON.
     """
     return JSONResponse(content={"success": True, "count": len(TRADE_LOGS), "trade_logs": TRADE_LOGS})
+
+
+
+async def auto_stop_bot(user_id: str, db: AsyncSession):
+    result = await db.execute(select(Bot).where(Bot.user_id == user_id))
+    bot = result.scalar_one_or_none()
+
+    if not bot:
+        return
+    bot_name=bot.bot_name
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.user_id == user_id)           
+    )
+    trade = result.scalars().first()
+    if bot.end_time <= datetime.utcnow():
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"https://api.binance.com/api/v3/ticker/price?symbol={trade.asset}"
+                )
+                current_price = float(resp.json()["price"])
+
+            # If execute_sell accepts user context, add it here.
+            await execute_sell(
+                reason="🛑 Bot expired",
+                price=current_price,
+                time_=datetime.utcnow(),
+                symbol=trade.asset,
+                entry_price=trade.buy_price,
+            )
+            print(f"✅ Sold {trade.asset} before expiry stop {bot_name} (user {user_id})")
+            # Update transaction record
+            trade.sell_price = current_price
+            trade.sell_time = datetime.utcnow()
+            trade.side = "SELL"
+            trade.status = "COMPLETED"
+            trade.profit = round(
+                (current_price - trade.buy_price) * trade.quantity - trade.exchange_fees,
+                8,
+            )
+            await db.commit()
+        except Exception as e:
+            print(f"⚠️ Error while selling before stopping bot: {e}")
+    bot.running = False
+    bot.active = False
+    await db.commit()
+    print(f"⛔ {bot.bot_name} stopped  for user {user_id} because duration expired.")
