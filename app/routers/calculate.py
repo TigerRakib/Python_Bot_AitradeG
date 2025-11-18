@@ -92,7 +92,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
         async with async_session() as db:
             result = await db.execute(
                 select(BotTradeState)
-                .where(BotTradeState.bot_id == bot_id)
+                .where(BotTradeState.user_id == bot_id)
                 .where(BotTradeState.asset == symbol)
             )
             state = result.scalars().first()
@@ -101,7 +101,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
                 state.action = action
                 state.logs = logs
             else:
-                db.add(BotTradeState(bot_id=bot_id, asset=symbol, action=action, logs=logs))
+                db.add(BotTradeState(user_id=bot_id, asset=symbol, action=action, logs=logs))
 
             await db.commit()
         print(f"📊 Bot state updated → {bot_id} | {symbol} | {action} | {logs}")
