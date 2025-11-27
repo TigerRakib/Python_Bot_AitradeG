@@ -517,9 +517,9 @@ async def tsl_monitor(symbols, all_3,bot_name,user_id):
                 await asyncio.gather(*tasks)
 
             # Break if no active symbols left
-            if not symbols:
-                print("🛑 All trades completed. Stopping TSL monitor.")
-                break
+            # if not symbols:
+            #     print("🛑 All trades completed. Stopping TSL monitor.")
+            #     break
             
             loop_end = time.time()
             sleep_time = max(0, SLEEP_INTERVAL - (loop_end - loop_start))

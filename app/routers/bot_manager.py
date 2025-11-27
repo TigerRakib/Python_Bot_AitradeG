@@ -73,7 +73,7 @@ async def start_bot(user_id: str,duration_days: int = Query(..., description="Bo
         raise HTTPException(status_code=400, detail=" User Bot is running currently")
     start_time = datetime.utcnow()
     end_time = start_time + timedelta(days=duration_days)
-    asyncio.create_task(fetch_and_execute_buy(user_id,bot_name))
+    # asyncio.create_task(fetch_and_execute_buy(user_id,bot_name))
     
 
     # 5) Mark DB record running
