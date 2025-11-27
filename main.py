@@ -35,8 +35,8 @@ executors = {
 
 scheduler = AsyncIOScheduler(executors=executors, timezone=timezone.utc)
 
-BUY_HOURS = [1, 5, 9, 13, 17,18, 21,]  # Every 4 hours
-BUY_MINUTE = 27
+BUY_HOURS = [1, 5, 9, 13, 17,21]  # Every 4 hours
+BUY_MINUTE = 10
 # SELL_HOURS = [0, 4, 8, 12,14, 16, 2,]
 # SELL_MINUTE = 51
 # ==========================
