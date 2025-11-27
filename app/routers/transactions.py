@@ -14,7 +14,7 @@ async def get_bot_transactions(user_id: str, db: AsyncSession = Depends(get_db))
     """
     try:
         result = await db.execute(
-            select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.buy_time.desc())
+            select(Transaction).where(Transaction.bot_id == user_id).order_by(Transaction.buy_time.desc())
         )
         transactions = result.scalars().all()
 
@@ -26,7 +26,7 @@ async def get_bot_transactions(user_id: str, db: AsyncSession = Depends(get_db))
         for t in transactions:
             transactions_list.append({
                 "id": t.id,
-                "user_id": t.user_id,
+                "user_id": t.bot_id,
                 "bot_name": t.bot_name,
                 "side": t.side,
                 "status": t.status,
@@ -59,7 +59,7 @@ async def get_bot_current_state(user_id: str, db: AsyncSession = Depends(get_db)
     try:
         result = await db.execute(
             select(BotTradeState)
-            .where(BotTradeState.user_id == user_id)
+            .where(BotTradeState.bot_id == user_id)
             .order_by(BotTradeState.updated_at.desc())
         )
         states = result.scalars().all()

@@ -4,7 +4,7 @@ from typing import List, Dict, Any
 ADVANCED_URL = "https://backend01.aisuperbot.org/api/v1/ai/four-hour-advanced/live"
 SIMPLE_URL = "https://backend01.aisuperbot.org/api/v1/python/predictions"
 SIGNALS_URL = "https://backend04.aisuperbot.org/api/v1/signals"
-
+ELEGIBLE_BUY="https://backend.aisuperbot.org/api/v1/eligible/all-token"
 
 async def fetch_json(url: str) -> Any:
     """Fetch JSON data asynchronously."""
@@ -30,9 +30,9 @@ async def get_buy_signals() -> Dict[str, Any]:
     advanced_task = asyncio.create_task(fetch_json(ADVANCED_URL))
     simple_task = asyncio.create_task(fetch_json(SIMPLE_URL))
     signals_task = asyncio.create_task(fetch_json(SIGNALS_URL))
-
-    advanced_data, simple_data, signals_data = await asyncio.gather(
-        advanced_task, simple_task, signals_task
+    eligible_buys = asyncio.create_task(fetch_json(ELEGIBLE_BUY))
+    advanced_data, simple_data, signals_data,elegible_data = await asyncio.gather(
+        advanced_task, simple_task, signals_task,eligible_buys
     )
 
     # --- Filters ---
@@ -112,20 +112,27 @@ async def get_buy_signals() -> Dict[str, Any]:
         if count==3:
             appear_all.append(item["symbol"]+"USDT")
     # print(appear_all)
-    SYMBOLS = [s["symbol"] + "USDT" for s in strong_buy_signals]
+    elegible_tokens=[]
+    true_signals={}
+    for item in elegible_data["data"]:
+        sym=item["symbol"]+"USDT"
+        true_signals[sym]=item["trueSignals"]
+        elegible_tokens.append(sym)
+    #print(elegible_tokens)
+    #SYMBOLS = [s["symbol"] + "USDT" for s in strong_buy_signals]
+    # print(elegible_tokens)
+    # print(true_signals)
     return {
-        "strong_buy": SYMBOLS,
-        "all_3":appear_all,
+        "strong_buy": elegible_tokens,
+        "signals":true_signals,
         }
-
 
 
 # async def main():
 #     results = await get_buy_signals()
 #     strong_buy_tokens = [s["symbol"] for s in results["strong_buy"]]
-#     print(strong_buy_tokens)
-#     print("\n✅ Strong Buy Tokens:")
-#     print(", ".join(strong_buy_tokens))
+#     # print("\n✅ Strong Buy Tokens:")
+#     # print(", ".join(strong_buy_tokens))
 
 # asyncio.run(main())
 

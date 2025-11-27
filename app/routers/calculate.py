@@ -33,10 +33,10 @@ else:
 
 API_KEY = os.getenv("API_KEY")
 API_SECRET = os.getenv("API_SECRET")
-API_BASE = "https://backend.mytradegenius.com/binance_prices/latest_5m"
+API_BASE = "https://backend01.mytradegenius.com/binance_prices/latest_5m"
 WS_URL = "wss://stream.binance.com:9443/stream?streams="
 
-SLEEP_INTERVAL = 5
+SLEEP_INTERVAL = 2
 WS_BATCH_SIZE = 200
 ENTRY_PRICE_UPDATE_HOURS = {1, 5, 9, 13, 17, 21}
 ENTRY_PRICE_UPDATE_MINUTE = 10
@@ -92,7 +92,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
         async with async_session() as db:
             result = await db.execute(
                 select(BotTradeState)
-                .where(BotTradeState.user_id == bot_id)
+                .where(BotTradeState.bot_id == bot_id)
                 .where(BotTradeState.asset == symbol)
             )
             state = result.scalars().first()
@@ -101,7 +101,7 @@ async def update_bot_state(bot_id: str, symbol: str, action: str, logs: str):
                 state.action = action
                 state.logs = logs
             else:
-                db.add(BotTradeState(user_id=bot_id, asset=symbol, action=action, logs=logs))
+                db.add(BotTradeState(bot_id=bot_id, asset=symbol, action=action, logs=logs))
 
             await db.commit()
         print(f"📊 Bot state updated → {bot_id} | {symbol} | {action} | {logs}")
@@ -126,7 +126,7 @@ async def execute_buy(user_id,bot_name, reason, price, time_, symbol, entry_amou
 
         new_trade = Transaction(
             id=trade_id,
-            user_id=user_id,
+            bot_id=user_id,
             bot_name=bot_name,
             side="BUY",
             status="Filled",
@@ -285,118 +285,198 @@ async def websocket_collector(symbols):
         batch = symbols[i:i + WS_BATCH_SIZE]
         tasks.append(ws_worker(batch))
     await asyncio.gather(*tasks)
-symbol_state={}
-async def process_symbol(session, symbol, entry, price_info, elapsed_min,all_3,bot_name,user_id):
+symbol_state = {}
+
+async def process_symbol(session, symbol, entry, price_info, elapsed_min, all_3, bot_name, user_id):
     try:
         price = price_info["price"]
         profit_pct = (price / entry) - 1
+        change_pct = profit_pct * 100
         atr = await get_cached_atr(session, symbol)
         if atr is None:
             return
-        # --- Update bot state in DB ---
 
         tsl = get_hybrid_tsl(entry, profit_pct, elapsed_min, atr)
-        tp1 = entry * 1.012
-        tp2 = entry * 1.005
+
+        # TP levels for info/logging
+        # Regular TP1 = +1.2%, TP2 = +0.4%
+        # Strong (all_3) TP1 = +2.0% until 199 mins (Condition 9.1)
+        tp1_display_pct = 2.0 if all_3 and elapsed_min <= 199 else 1.2
+        tp1 = entry * (1 + tp1_display_pct / 100)
+        tp2 = entry * 1.004  # +0.4%
 
         print(
             f"{user_id} | {bot_name} | [{datetime.utcnow():%H:%M:%S}] {symbol} | Price: {price:.5f} | "
-            f"TSL: {tsl:.5f} | TP1: {tp1:.5f} | TP2: {tp2:.5f} | "
+            f"TSL: {tsl:.5f} | TP1({tp1_display_pct:.1f}%): {tp1:.5f} | TP2(+0.4%): {tp2:.5f} | "
             f"Profit: {profit_pct*100:.3f}% | Time: {elapsed_min:.1f}m"
         )
 
-        # --- SELL CONDITIONS ---
-        """Check all sell conditions and execute sell if any is met."""
-        # Get or initialize per-symbol state
+        # ==============================================================
+        # Per-symbol state for Conditions 2, 5, 6
+        # ==============================================================
         state = symbol_state.get(symbol, {
-            "was_above_half": False,
-            "tsl_touched": False,
-            "price_near_tsl": False,
+            "was_above_04": False,        # For Condition 2: went above +0.4%
+            "tsl_touched_above": False,   # For Condition 5: crossed above TSL
+            "price_near_tsl": False,      # For Condition 6: got close to TSL from below
         })
 
-        change_pct = ((price - entry) / entry) * 100
         current_time = datetime.utcnow()
-        if all_3:
-            if change_pct >= 1.2:
-                await execute_sell("TP1 (+1.2%) reached for all three buy signals symbol", price, current_time, symbol, entry)
-                return True
-            elif elapsed_min >= 240:
-                await execute_sell("Force sell at 240 mins of all three buy signals symbol", price, current_time, symbol, entry)
-                return True
-        else:
-            # ==============================================================
-            # Condition 7: Force Stop (-1%) after 200 mins
-            # ==============================================================
-            if elapsed_min > 200 and price <= entry * 0.99:
-                await execute_sell("Force Stop (-1%) after 200 mins", price, current_time, symbol, entry)
-                return True
 
-            # ==============================================================
-            # Phase 1 — Before 200 mins
-            # ==============================================================
-            if elapsed_min <= 200:
-
-                # Condition 1: TP1 (1.2%)
-                if change_pct >= 1.2:
-                    await execute_sell("TP1 (+1.2%) before 200 mins", price, current_time, symbol, entry)
-                    return True
-
-                # Condition 2: TP2 (fall below +0.5% after going above)
-                if change_pct >= 0.5:
-                    state["was_above_half"] = True
-                elif state["was_above_half"] and change_pct < 0.5:
-                    await execute_sell("TP2 fallback: Fell below +0.5% after going above before 200 mins", price, current_time, symbol, entry)
-                    return True
-
-            # ==============================================================
-            # Phase 2 — After 200 mins (200–240)
-            # ==============================================================
-            elif 200 < elapsed_min <= 240:
-
-                # Condition 3: Gradually reduce TP from 0.5% → 0.2%
-                gradual_tp = 0.5 - ((elapsed_min - 200) / 40) * (0.5 - 0.2)  # Linear fade
-                if change_pct >= gradual_tp:
-                    await execute_sell(f"Gradual TP reached ({gradual_tp:.2f}%) after 200 mins", price, current_time, symbol, entry)
-                    return True
-
-                # --- TSL-related conditions ---
-                if tsl:
-
-                    # Condition 4: Sell if falls below TSL after 200 mins
-                    if price <= tsl:
-                        await execute_sell("Price fell below TSL after 200 mins", price, current_time, symbol, entry)
-                        return True
-
-                    # Condition 5: Sell when price rises above TSL and falls
-                    if price > tsl:
-                        state["tsl_touched"] = True
-                    elif state["tsl_touched"] and price < tsl:
-                        await execute_sell("Price rose above TSL and fell after 200 mins", price, current_time, symbol, entry)
-                        return True
-
-                    # Condition 6: If below TSL, rises near TSL then falls
-                    if price < tsl:
-                        if abs(price - tsl) / tsl < 0.001:  # within 0.1%
-                            state["price_near_tsl"] = True
-                        elif state["price_near_tsl"] and price < tsl:
-                            await execute_sell("Price rose near TSL and fell again after 200 mins", price, current_time, symbol, entry)
-                            return True
-
-            # ==============================================================
-            # Condition 8: Time-based exit (240 mins)
-            # ==============================================================
-            elif elapsed_min >= 240:
-                await execute_sell("Time-based exit (240 mins)", price, current_time, symbol, entry)
-                return True
-        
         # ==============================================================
-        # Save updated state
+        # Condition 7: Hard Sell (-0.6%) from 70 to 199 mins
+        # Applies to all positions (including special ones)
+        # ==============================================================
+        if 70 <= elapsed_min <= 199 and change_pct <= -0.6:
+            await execute_sell(
+                "Condition 7: Hard Sell (-0.6%) from 70–199 mins",
+                price, current_time, symbol, entry
+            )
+            return True
+
+        # ==============================================================
+        # Conditions 1 & 2: From 10 mins to 229 mins
+        # ==============================================================
+        if 10 <= elapsed_min <= 229:
+
+            # ----------------------------------------------------------
+            # Condition 1: Take Profit 1
+            #   - Normal: +1.2%
+            #   - Special (all_3): +2.0% until 199 mins (Condition 9.1)
+            # ----------------------------------------------------------
+            if all_3 and elapsed_min <= 199:
+                tp1_target_pct = 2.0  # Condition 9.1
+            else:
+                tp1_target_pct = 1.2
+
+            if change_pct >= tp1_target_pct:
+                msg = (
+                    f"Condition 1 / 9.1: TP1 reached (+{tp1_target_pct:.1f}%) "
+                    f"at {elapsed_min:.1f} mins"
+                )
+                await execute_sell(msg, price, current_time, symbol, entry)
+                return True
+
+            # ----------------------------------------------------------
+            # Condition 2:
+            # From 10 to 229 mins, sell at TP2 when price drops
+            # after having first risen above +0.4% but below TP1.
+            #
+            # For special (all_3) positions BEFORE 200 mins,
+            # we IGNORE Condition 2 (we "hold for TP1 at +2.0%"
+            # as per Condition 9.1).
+            # ----------------------------------------------------------
+            if not (all_3 and elapsed_min <= 199):
+
+                # Track if we ever went above +0.4% (but below TP1)
+                if change_pct >= 0.4 and change_pct < tp1_target_pct:
+                    state["was_above_04"] = True
+
+                # If we had gone above +0.4% earlier and now fall below +0.4%, sell
+                elif state["was_above_04"] and change_pct < 0.4:
+                    await execute_sell(
+                        "Condition 2: Fell back below +0.4% after rising above (but below TP1)",
+                        price, current_time, symbol, entry
+                    )
+                    return True
+
+        # ==============================================================
+        # Phase 200–229 mins: Conditions 3–6 + (for special) "follow 1–7"
+        # ==============================================================
+        if 200 <= elapsed_min <= 229:
+
+            # ----------------------------------------------------------
+            # Condition 3:
+            # Gradually lower TP from +0.4% to +0.2% between 200–229 mins
+            # and sell once hit.
+            # ----------------------------------------------------------
+            if change_pct > 0:
+                start_pct = 0.4
+                end_pct = 0.2
+                window_start = 200.0
+                window_end = 229.0
+                window = window_end - window_start  # 29
+
+                # Clamp elapsed_min just in case
+                em = max(window_start, min(elapsed_min, window_end))
+                progress = (em - window_start) / window  # 0 → 1
+                gradual_tp = start_pct - progress * (start_pct - end_pct)  # 0.4 → 0.2
+
+                if change_pct >= gradual_tp:
+                    await execute_sell(
+                        f"Condition 3: Gradual TP reached ({gradual_tp:.2f}%) between 200–229 mins",
+                        price, current_time, symbol, entry
+                    )
+                    return True
+
+            # ----------------------------------------------------------
+            # TSL-related Conditions (4, 5, 6) from 200–229 mins
+            # ----------------------------------------------------------
+            if tsl:
+
+                # Condition 4:
+                # From 200 mins to 229 mins, sell at TSL if price falls to TSL.
+                if price <= tsl:
+                    await execute_sell(
+                        "Condition 4: Price touched/below TSL between 200–229 mins",
+                        price, current_time, symbol, entry
+                    )
+                    return True
+
+                # Condition 5:
+                # From 200 to 229 mins, if price is below TSL, then rises above TSL,
+                # but falls back to TSL → sell at TSL.
+                #
+                # We interpret this as:
+                # - Mark when price goes above TSL
+                # - If later price returns to <= TSL, sell.
+                if price > tsl:
+                    state["tsl_touched_above"] = True
+                elif state["tsl_touched_above"] and price <= tsl:
+                    await execute_sell(
+                        "Condition 5: Price rose above TSL then fell back to TSL between 200–229 mins",
+                        price, current_time, symbol, entry
+                    )
+                    return True
+
+                # Condition 6:
+                # From 200 to 229 mins, if price is below TSL and approaches TSL
+                # (within ~0.1%), then declines again → sell.
+                if price < tsl:
+                    near_threshold = 0.001  # 0.1%
+                    distance = abs(price - tsl) / tsl
+
+                    # If we come close to TSL from below
+                    if distance < near_threshold:
+                        state["price_near_tsl"] = True
+                    # If we were near TSL before and now moved further away (still below)
+                    elif state["price_near_tsl"] and price < tsl:
+                        await execute_sell(
+                            "Condition 6: Price approached TSL from below and declined again between 200–229 mins",
+                            price, current_time, symbol, entry
+                        )
+                        return True
+
+        # ==============================================================
+        # Condition 8 & 9.2: Time-based exit at 230 mins
+        # ==============================================================
+        if elapsed_min >= 230:
+            if all_3:
+                reason = "Condition 9.2: Special strong signal time-based exit at 230 mins"
+            else:
+                reason = "Condition 8: Time-based exit at 230 mins"
+            await execute_sell(reason, price, current_time, symbol, entry)
+            return True
+
+        # ==============================================================
+        # Save updated state and continue holding
         # ==============================================================
         symbol_state[symbol] = state
         return False
+
     except Exception as e:
         print(f"[PROCESS ERROR] {symbol}: {e}")
         return False
+
 # ============================================================
 # MAIN TSL MONITOR LOOP
 # ============================================================
@@ -419,6 +499,7 @@ async def tsl_monitor(symbols, all_3,bot_name,user_id):
                 async with async_session() as db:
                     result = await db.execute(
                         select(Transaction.status).where(
+                            Transaction.bot_name==bot_name,
                             Transaction.asset == symbol,
                             Transaction.status == "COMPLETED"
                         )
@@ -479,8 +560,8 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
         # print("DEBUG: Raw buy signals:", buy_signals)
         strong_buy_symbols = buy_signals.get("strong_buy", [])
         print(f"🎯 Strong Buy Symbols: {strong_buy_symbols}")
-        buy_all_signals=buy_signals.get("all_3", [])
-        print(f"ALL three signals : {buy_all_signals}")
+        signals=buy_signals.get("signals", [])
+        print(f"signals : {signals}")
     except Exception as e:
         print(f"[⚠️] Error fetching strong buy signals: {e}")
         strong_buy_symbols = []
@@ -493,8 +574,9 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
     symbol = random.choice(strong_buy_symbols)
     print(f"🎯 Randomly selected symbol for this run: {symbol}")
     all_3=False
-    if symbol in buy_all_signals:
-        all_3=True
+    if symbol in signals:
+        if len(signals[symbol])==3 or "LG" in signals[symbol]:
+            all_3=True
     # Start WebSocket collector for that token
     asyncio.create_task(websocket_collector([symbol]))
     print(f"🔌 WebSocket collector started for {symbol}")
@@ -513,7 +595,7 @@ async def fetch_and_execute_buy(user_id: str,bot_name: str):
         entry_price,
         datetime.utcnow(),
         symbol,
-        50,
+        1000,
         "4h"
     )
     BOUGHT_SYMBOLS.add(symbol)
@@ -532,51 +614,65 @@ async def get_trade_logs():
     """
     return JSONResponse(content={"success": True, "count": len(TRADE_LOGS), "trade_logs": TRADE_LOGS})
 
+async def auto_stop_bot(user_id: str):
+    async with async_session() as db:
+        # Fetch bot
+        result = await db.execute(select(Bot).where(Bot.user_id == user_id))
+        bot = result.scalar_one_or_none()
+        if not bot:
+            print("❌ No bot found")
+            return
+        
 
+        # Fetch active transaction
+        result = await db.execute(
+            select(Transaction)
+            .where(Transaction.bot_id == user_id)
+        )
+        trade = result.scalars().first()
 
-async def auto_stop_bot(user_id: str, db: AsyncSession):
-    result = await db.execute(select(Bot).where(Bot.user_id == user_id))
-    bot = result.scalar_one_or_none()
+        # Stop bot if expired
+        now = datetime.utcnow()
+        if bot.end_time and bot.end_time <= now:
 
-    if not bot:
-        return
-    bot_name=bot.bot_name
-    result = await db.execute(
-        select(Transaction)
-        .where(Transaction.user_id == user_id)           
-    )
-    trade = result.scalars().first()
-    if bot.end_time <= datetime.utcnow():
-        try:
-            import httpx
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"https://api.binance.com/api/v3/ticker/price?symbol={trade.asset}"
-                )
-                current_price = float(resp.json()["price"])
+            if trade:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(
+                            f"https://api.binance.com/api/v3/ticker/price?symbol={trade.asset}"
+                        )
+                        current_price = float(resp.json()["price"])
 
-            # If execute_sell accepts user context, add it here.
-            await execute_sell(
-                reason="🛑 Bot expired",
-                price=current_price,
-                time_=datetime.utcnow(),
-                symbol=trade.asset,
-                entry_price=trade.buy_price,
-            )
-            print(f"✅ Sold {trade.asset} before expiry stop {bot_name} (user {user_id})")
-            # Update transaction record
-            trade.sell_price = current_price
-            trade.sell_time = datetime.utcnow()
-            trade.side = "SELL"
-            trade.status = "COMPLETED"
-            trade.profit = round(
-                (current_price - trade.buy_price) * trade.quantity - trade.exchange_fees,
-                8,
-            )
+                    # Execute the sell
+                    await execute_sell(
+                        reason="🛑 Bot expired",
+                        price=current_price,
+                        time_=now,
+                        symbol=trade.asset,
+                        entry_price=trade.buy_price,
+                    )
+
+                    # Update transaction
+                    trade.sell_price = current_price
+                    trade.sell_time = now
+                    trade.side = "SELL"
+                    trade.status = "COMPLETED"
+                    trade.profit = round(
+                        (current_price - trade.buy_price) * trade.quantity
+                        - trade.exchange_fees,
+                        8,
+                    )
+
+                    print(f"✅ Sold {trade.asset} due to bot expiry for user {user_id}")
+
+                except Exception as e:
+                    print(f"⚠️ Error auto-selling on expiry: {e}")
+
+            # Mark bot as stopped
+            bot.running = False
+            bot.active = False
+
             await db.commit()
-        except Exception as e:
-            print(f"⚠️ Error while selling before stopping bot: {e}")
-    bot.running = False
-    bot.active = False
-    await db.commit()
-    print(f"⛔ {bot.bot_name} stopped  for user {user_id} because duration expired.")
+            print(f"⛔ Bot {bot.bot_name} stopped for user {user_id} (expired).")
+            return
