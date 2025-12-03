@@ -10,6 +10,7 @@ import asyncio
 from app.routers.bot_manager import router as bot_manager_router, get_all_active_users
 from app.routers.calculate import fetch_and_execute_buy
 from app.routers.transactions import router as transactions_logs
+from app.routers.get_all_info import router as get_all_info_router
 
 from app.database import async_session
 from app.models import Bot 
@@ -27,6 +28,8 @@ app.add_middleware(
 
 app.include_router(bot_manager_router)
 app.include_router(transactions_logs)
+app.include_router(get_all_info_router)
+
 # Scheduler setup
 executors = {
     "asyncio": AsyncIOExecutor(),
